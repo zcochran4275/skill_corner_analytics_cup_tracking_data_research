@@ -328,7 +328,7 @@ def animate_run(run,tracking_data,player_to_team,title=""):
             if not (all_zero_x and all_zero_y):
                 valid_player_ids.append(pid)
     fig, ax = plot_soccer_pitch(pitch_color="white")
-    player_to_color = {pid: "g" if int(pid) == player_id else "b" if player_to_team.loc[int(pid)].iloc[0] == team_id else "r" for pid in valid_player_ids}
+    player_to_color = {pid: "purple" if int(pid) == -1 else "g" if int(pid) == player_id else "b" if player_to_team.loc[int(pid)].iloc[0] == team_id else "r" for pid in valid_player_ids}
     all_colors = list(player_to_color.values()) + ['black']
     dummy_coords = np.zeros((len(player_to_color)+1, 2))
     scat = ax.scatter(dummy_coords[:, 0], dummy_coords[:, 1], c=all_colors, s=50)
@@ -350,7 +350,9 @@ def animate_run(run,tracking_data,player_to_team,title=""):
     legend_handles.append(
             plt.Line2D([0], [0], color="blue", marker="o", linestyle="", alpha=0.4, label="Offensive Players"))
     legend_handles.append(
-            plt.Line2D([0], [0], color="green", marker="o", linestyle="", label="Player Making the Run"))
+            plt.Line2D([0], [0], color="purple", marker="o", linestyle="", alpha=0.4, label="Optimal Run"))
+    legend_handles.append(
+            plt.Line2D([0], [0], color="green", marker="o", linestyle="", label="Actual Run Made"))
     plt.legend(handles=legend_handles, loc="upper left", frameon=True, title="Legend", fontsize=9, title_fontsize=10)
     #title
     if title == "":
