@@ -244,10 +244,8 @@ def get_runs_from_match(match_id):
         'ball_x', 'ball_y', 'ball_z', 'ball_speed', 'match_id', 'run_id',
         'run_active','id']
 
-    # Player-specific columns
     player_cols = [c for c in run_tracking_all.columns if c not in meta_cols]
 
-    # Wide → Long: one row per player per frame
     tracking_long = (
         run_tracking_all
         .melt(
@@ -258,10 +256,8 @@ def get_runs_from_match(match_id):
         )
     )
 
-    # Split into player ID and feature type (x, y, d, s)
     tracking_long[['player', 'feature']] = tracking_long['player_feature'].str.extract(r'(\d+)_(x|y|d|s)')
 
-    # Now pivot *only* the feature part (so x, y, d, s become columns)
     tracking_long = (
         tracking_long
         .pivot(index=meta_cols + ['player'], columns='feature', values='value')
