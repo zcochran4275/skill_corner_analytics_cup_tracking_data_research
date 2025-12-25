@@ -6,6 +6,8 @@ import numpy as np
 import json
 import requests
 from kloppy import skillcorner
+import warnings
+warnings.filterwarnings("ignore")
 
 def get_raw(file_list, destination_directory):
     """
@@ -320,7 +322,7 @@ def collect_all_data():
     run_features = []
     tracking_data = []
     player_team = []
-    for match_id in tqdm.tqdm(matches_info["id"]):
+    for match_id in tqdm(matches_info["id"]):
         poss = get_possessions_from_match_id(match_id=match_id)
         possessions.append(poss)
         
@@ -345,6 +347,174 @@ def collect_all_data():
     
     player_team = player_team.drop_duplicates()
     
-    return matches_info, possessions, run_features, tracking_data_2, player_team
+    tracking_data_2 = add_velocity_acceleration_to_tracking(tracking_data_2)
     
+    tracking_data_2["player"] = tracking_data_2["player"].astype(int)
+    
+    merged = pd.merge(possessions,run_features,on=["match_id","possession_index"],how="outer",suffixes=("_possession","_run"))
+
+    merged["possession_lead_to_shot"] = (merged["possession_lead_to_shot"] | merged["lead_to_shot"])# Need to update wheter runs and possessions lead to shots on values that conflict
+    merged["possession_lead_to_goal"] = (merged["possession_lead_to_goal"] | merged["lead_to_goal"])
+
+    
+    return possessions, run_features, tracking_data_2, player_team.set_index("id"), merged
+
+def add_velocity_acceleration_to_tracking(tracking_data):
+    tracking_data = tracking_data.sort_values(
+        ["match_id","run_id","player", "timestamp"]
+    )
+
+    tracking_data["dx"] = (
+        tracking_data["x"]
+        - tracking_data.groupby(["match_id","player", "run_id"])["x"].shift(1)
+    )
+    tracking_data["dy"] = (
+        tracking_data["y"]
+        - tracking_data.groupby(["match_id","player", "run_id"])["y"].shift(1)
+    )
+
+    tracking_data["ax"] = (
+        tracking_data["dx"]
+        - tracking_data.groupby(["match_id","player", "run_id"])["dx"].shift(1)
+    )
+    tracking_data["ay"] = (
+        tracking_data["dy"]
+        - tracking_data.groupby(["match_id","player", "run_id"])["dy"].shift(1)
+    )
+    # Fill na first rows
+    tracking_data[["dx", "dy","ax","ay"]] = (
+        tracking_data.groupby(["match_id", "run_id", "player"])[["dx", "dy","ax","ay"]]
+        .bfill()
+    )
+
+    #Speed
+    FPS = 10
+
+    tracking_data["speed"] = (
+        np.sqrt(
+            tracking_data["dx"]**2 +
+            tracking_data["dy"]**2
+        ) * FPS
+    )
+    tracking_data["speed_direction"] = np.arctan2(
+        tracking_data["dy"],
+        tracking_data["dx"]
+    )
+    eps = 1e-6
+
+    vx = tracking_data["dx"]
+    vy = tracking_data["dy"]
+    speed_frame = np.sqrt(vx**2 + vy**2)
+
+    vhat_x = vx / (speed_frame + eps)
+    vhat_y = vy / (speed_frame + eps)
+
+    tracking_data["acceleration"] = (
+        (tracking_data["ax"] * vhat_x +
+        tracking_data["ay"] * vhat_y)
+        * FPS**2
+    )
+    tracking_data["acc_direction"] = np.arctan2(
+        tracking_data["ay"],
+        tracking_data["ax"]
+    )
+    
+    # Ball Speed and acceleration
+    tracking_data["ball_dx"] = (
+        tracking_data["ball_x"]
+        - tracking_data.groupby(["match_id", "period_id","run_id"])["ball_x"].shift(1)
+    )
+
+    tracking_data["ball_dy"] = (
+        tracking_data["ball_y"]
+        - tracking_data.groupby(["match_id", "period_id","run_id"])["ball_y"].shift(1)
+    )
+
+    tracking_data["ball_ax"] = (
+        tracking_data["ball_dx"]
+        - tracking_data.groupby(["match_id", "period_id","run_id"])["ball_dx"].shift(1)
+    )
+
+    tracking_data["ball_ay"] = (
+        tracking_data["ball_dy"]
+        - tracking_data.groupby(["match_id", "period_id","run_id"])["ball_dy"].shift(1)
+    )
+    # Fill na first rows
+    tracking_data[["ball_dx", "ball_dy","ball_ax","ball_ay"]] = (
+        tracking_data.groupby(["match_id", "run_id", "player"])[["ball_dx", "ball_dy","ball_ax","ball_ay"]]
+        .bfill()
+    )
+
+    tracking_data["ball_speed"] = (
+        np.sqrt(
+            tracking_data["ball_dx"]**2 +
+            tracking_data["ball_dy"]**2
+        ) * FPS
+    )
+
+    tracking_data["ball_speed_direction"] = np.arctan2(
+        tracking_data["ball_dy"],
+        tracking_data["ball_dx"]
+    )
+    vx = tracking_data["ball_dx"]
+    vy = tracking_data["ball_dy"]
+
+    speed_frame = np.sqrt(vx**2 + vy**2)
+
+    vhat_x = vx / (speed_frame + eps)
+    vhat_y = vy / (speed_frame + eps)
+
+    tracking_data["ball_acceleration"] = (
+        (tracking_data["ball_ax"] * vhat_x +
+        tracking_data["ball_ay"] * vhat_y)
+        * FPS**2
+    )
+
+    tracking_data["ball_acc_direction"] = np.arctan2(
+        tracking_data["ball_ay"],
+        tracking_data["ball_ax"]
+    )
+    return tracking_data
+
+def collect_data_from_matches(match_ids):    
+    possessions = []
+    run_features = []
+    tracking_data = []
+    player_team = []
+    for match_id in tqdm(match_ids):
+        poss = get_possessions_from_match_id(match_id=match_id)
+        possessions.append(poss)
+        
+        run_feat, tracking, player_to_team = get_runs_from_match(match_id=match_id)
+        run_features.append(run_feat)
+        tracking_data.append(tracking)
+        player_team.append(player_to_team)
+        
+    possessions = pd.concat(possessions)
+    run_features = pd.concat(run_features)
+    tracking_data = pd.concat(tracking_data)
+    player_team = pd.concat(player_team)
+
+    run_features = pd.merge(run_features,possessions.explode(["phases_indexes"])[["match_id","phases_indexes","possession_index"]],left_on=["match_id","phase_index"],right_on=["match_id","phases_indexes"],how="left")
+    
+    run_features = run_features.dropna()
+    
+    tracking_data_2 = tracking_data[(~((tracking_data["ball_x"].isna()) & (tracking_data["ball_y"].isna()))) & (~((tracking_data["x"].isna()) & (tracking_data["y"].isna())))].drop(["ball_owning_team_id","ball_state","ball_z"],axis=1)
+    tracking_data_2["s"] = tracking_data_2["s"].fillna(0)
+    tracking_data_2["d"] = tracking_data_2["d"].fillna(0)
+    tracking_data_2["ball_speed"] = tracking_data_2["ball_speed"].fillna(0)
+    
+    player_team = player_team.drop_duplicates()
+    
+    tracking_data_2 = add_velocity_acceleration_to_tracking(tracking_data_2)
+    
+    tracking_data_2["player"] = tracking_data_2["player"].astype(int)
+    
+    merged = pd.merge(possessions,run_features,on=["match_id","possession_index"],how="outer",suffixes=("_possession","_run"))
+
+    merged["possession_lead_to_shot"] = (merged["possession_lead_to_shot"] | merged["lead_to_shot"])# Need to update wheter runs and possessions lead to shots on values that conflict
+    merged["possession_lead_to_goal"] = (merged["possession_lead_to_goal"] | merged["lead_to_goal"])
+
+    
+    return possessions, run_features, tracking_data_2, player_team.set_index("id"), merged
 

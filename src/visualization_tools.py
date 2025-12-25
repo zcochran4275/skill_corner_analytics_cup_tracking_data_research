@@ -398,3 +398,83 @@ def animate_run(run,tracking_data,player_to_team,title=""):
     ani = animation.FuncAnimation(fig, update, frames=len(run_tracking), init_func=init, blit=False, interval=100, repeat=True)
     plt.show()
     return ani
+
+def plot_spatial_graph(data, title=None):
+    runner_idx = data.runner_idx.item()
+    team_ids = data.team_ids
+    runner_team = team_ids[runner_idx].item()
+    pos = data.x[:, :2].cpu().numpy()
+    edge_index = data.edge_index.cpu().numpy()
+    colors = ["black" if team_id.item() == -1 else "blue" if team_id.item() == runner_team else "red" for team_id in team_ids]
+
+
+    fig, ax = plot_soccer_pitch()
+
+    # plot edges
+    for i, j in edge_index.T:
+        plt.plot(
+            [pos[i, 0], pos[j, 0]],
+            [pos[i, 1], pos[j, 1]],
+            color="gray",
+            alpha=0.4,
+            linewidth=0.8
+        )
+
+    # plot nodes
+    plt.scatter(pos[:, 0], pos[:, 1],c=colors, s=80, zorder=3)
+
+    # highlight runner if available
+    if hasattr(data, "runner_idx"):
+        r = int(data.runner_idx)
+        plt.scatter(pos[r, 0], pos[r, 1],c="yellow", s=140, marker="*", zorder=4)
+
+    legend_handles = []
+    legend_handles.append(
+            plt.Line2D([0], [0], color="black", marker="o", linestyle="", label="Ball"))
+    legend_handles.append(
+            plt.Line2D([0], [0], color="red", marker="o", linestyle="", alpha=0.4, label="Defensive Players"))
+    legend_handles.append(
+            plt.Line2D([0], [0], color="blue", marker="o", linestyle="", alpha=0.4, label="Offensive Players"))
+    legend_handles.append(
+            plt.Line2D([0], [0], color="yellow", marker="*", linestyle="", label="Run Player"))
+    plt.legend(handles=legend_handles, loc="upper left", frameon=True, title="Legend", fontsize=9, title_fontsize=10)
+    plt.gca().set_aspect("equal")
+    plt.xlabel("x")
+    plt.ylabel("y")
+    plt.title(title or "Frame Graph")
+    plt.grid(alpha=0.3)
+    plt.show()
+    
+def plot_optimal_run(run, tracking_frame_groups,player_to_team, absolute_path, plot_ball = True,plot_defense = True):
+    match_id = run['match_id']
+    run_id = run['event_id']
+    runner_id = run['player_id']
+    team_id = run["team_id"]
+
+    fig,ax = plot_soccer_pitch()
+
+    run_tracking = tracking_frame_groups[(match_id, run_id)].sort_values('frame_id')
+    active_run = run_tracking[run_tracking.run_active]
+    actual_points = active_run[(active_run.player == runner_id)][["x","y"]]
+    real_x = actual_points.values[:,0]
+    real_y = actual_points.values[:,1]
+    plt.scatter(x=real_x,y=real_y,color="green",label="Actual Run")
+
+    if plot_ball == True:
+        ball_coords = active_run.iloc[:, ["ball" in col for col in active_run.columns]]
+        ball_x = ball_coords.loc[:, "ball_x"].values
+        ball_y = ball_coords.loc[:, "ball_y"].values
+        ax.scatter(ball_x, ball_y, color="black", alpha=0.5, label="Ball Trajectory")
+
+    if plot_defense == True:
+        defender_frames = active_run[(active_run["player"].apply(lambda id: player_to_team.loc[id])!=team_id).values[:,0]]
+        def_x = defender_frames["x"]
+        def_y = defender_frames["y"]
+        plt.scatter(x=def_x,y=def_y,color="red",label = "Defender Runs")
+        
+    pred_x = pd.Series(absolute_path[:,0])
+    pred_y = pd.Series(absolute_path[:,1])
+    plt.scatter(x=pred_x,y=pred_y,label = "Optimized Run")
+
+    plt.legend()
+    plt.show()
