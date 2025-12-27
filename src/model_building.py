@@ -209,11 +209,23 @@ class TemporalRunnerDataset(Dataset):
             goal_label = torch.tensor(0.0) 
         else:
             goal_label = torch.tensor(float(lead_to_goal_val[0]))
+        
+        x_threat_run = self.run_features.loc[self.run_features['id'] == run_id, 'xthreat'].values
+        if len(x_threat_run) == 0:
+            x_threat_run = torch.tensor(0.0) 
+        else:
+            x_threat_run = torch.tensor(float(x_threat_run[0]))
+        
+        x_pass_run = self.run_features.loc[self.run_features['id'] == run_id, 'xpass_completion'].values
+        if len(x_pass_run) == 0:
+            x_pass_run = torch.tensor(0.0) 
+        else:
+            x_pass_run = torch.tensor(float(x_pass_run[0]))
 
-        return graphs, target_path, shot_label, goal_label
+        return graphs, target_path, shot_label, goal_label, x_threat_run, x_pass_run
 
 def collate_fn(batch, max_len=100):
-    graphs_list, targets_list, shot_labels_list, goal_labels_list = zip(*batch)
+    graphs_list, targets_list, shot_labels_list, goal_labels_list, x_threat_list, x_pass_list = zip(*batch)
 
     batch_graphs = Batch.from_data_list([g for graphs in graphs_list for g in graphs])
 
@@ -229,8 +241,11 @@ def collate_fn(batch, max_len=100):
     lengths = [min(l, max_len) for l in lengths]
     shot_labels = torch.tensor(shot_labels_list, dtype=torch.float)
     goal_labels = torch.tensor(goal_labels_list, dtype=torch.float)
+    x_t_labels = torch.tensor(x_threat_list, dtype=torch.float)
+    x_pass_labels = torch.tensor(x_pass_list, dtype=torch.float)
 
-    return batch_graphs, padded_targets, lengths, shot_labels, goal_labels
+
+    return batch_graphs, padded_targets, lengths, shot_labels, goal_labels, x_t_labels,x_pass_labels
 
 
 class TemporalRunnerGNN(nn.Module):
@@ -301,8 +316,13 @@ def train_model(model, device, dataloader,num_epochs = 10):
 
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
-    lambda_vel = .5
+    lambda_vel = 1.0
     lambda_acc = .1
+    lambda_speed = .5
+    lambda_xT = 2
+    lambda_xPass = 1
+    v_max = 9.5
+    a_max = 6.0
 
     shot_weight = 2.0
     goal_weight = 3.0
@@ -312,11 +332,13 @@ def train_model(model, device, dataloader,num_epochs = 10):
     
     for epoch in range(num_epochs):
         total_loss = 0
-        for batch_graphs, padded_targets, lengths, shot_labels, goal_labels in tqdm(dataloader):
+        for batch_graphs, padded_targets, lengths, shot_labels, goal_labels, x_threat_labels, x_pass_labels in tqdm(dataloader):
             batch_graphs = batch_graphs.to(device)
             padded_targets = padded_targets.to(device)
             shot_labels = shot_labels.to(device)
             goal_labels = goal_labels.to(device)
+            x_threat_labels = x_threat_labels.to(device)
+            x_pass_labels = x_pass_labels.to(device)
             
             optimizer.zero_grad()
 
@@ -333,19 +355,29 @@ def train_model(model, device, dataloader,num_epochs = 10):
                     pred_vel = pred_seq[1:] - pred_seq[:-1]
                     target_vel = target_seq[1:] - target_seq[:-1]
                     loss_vel = F.mse_loss(pred_vel, target_vel)
+                    
+                    pred_vel = (pred_seq[1:] - pred_seq[:-1]) / .1
+                    speed = torch.norm(pred_vel, dim=-1)
+
+                    excess_speed = torch.relu(speed - v_max)
+                    loss_speed = torch.mean(excess_speed ** 2)
                 else:
                     loss_vel = 0
 
                 if length > 2:
-                    pred_acc = pred_vel[1:] - pred_vel[:-1]
-                    loss_acc = torch.mean(pred_acc.pow(2))
+                    pred_acc = (pred_vel[1:] - pred_vel[:-1]) / .1
+                    acc_mag = torch.norm(pred_acc, dim=-1)
+
+                    excess_acc = torch.relu(acc_mag - a_max)
+                    loss_acc = torch.mean(excess_acc ** 2)
                 else:
                     loss_acc = 0
 
-                sample_loss = loss_pos + lambda_vel * loss_vel + lambda_acc * loss_acc
+
+                sample_loss = loss_pos + lambda_vel * loss_vel + lambda_acc * loss_acc + lambda_speed * loss_speed
 
                 # Calculate sample weight
-                sample_weight = base_weight + shot_weight * shot_labels[i] + goal_weight * goal_labels[i]
+                sample_weight = base_weight + lambda_xPass * x_pass_labels[i] * (lambda_xT * x_threat_labels[i] + shot_weight * shot_labels[i] + goal_weight * goal_labels[i])
 
                 loss += sample_loss * sample_weight
 
