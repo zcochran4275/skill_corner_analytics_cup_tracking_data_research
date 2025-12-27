@@ -9,47 +9,6 @@ from kloppy import skillcorner
 import warnings
 warnings.filterwarnings("ignore")
 
-def get_raw(file_list, destination_directory):
-    """
-    Downloads a list of files to a specified destination directory with progress bars.
-
-    Args:
-        file_list (list): A list of dictionaries, where each dictionary
-                          contains 'url' (the URL of the file) and 'filename'
-                          (the desired local filename).
-        destination_directory (str): The path to the directory where files
-                                     should be saved.
-    """
-    if not os.path.exists(destination_directory):
-        print(f"Error directory {destination_directory} does not exist")
-        return
-
-    for file_info in tqdm(file_list, desc="Overall Download Progress"):
-        url = file_info['url']
-        filename = file_info['filename']
-        local_filepath = os.path.join(destination_directory, filename)
-
-        try:
-            response = requests.get(url, stream=True)
-            response.raise_for_status()  # Raise an exception for bad status codes
-
-            total_size = int(response.headers.get('content-length', 0))
-            block_size = 1024  # 1 KB
-
-            with open(local_filepath, 'wb') as f:
-                with tqdm(total=total_size, unit='B', unit_scale=True,
-                          desc=f"Downloading {filename}", leave=False) as pbar:
-                    for chunk in response.iter_content(chunk_size=block_size):
-                        if chunk:  # filter out keep-alive new chunks
-                            f.write(chunk)
-                            pbar.update(len(chunk))
-            print(f"Successfully downloaded: {filename}")
-        except requests.exceptions.RequestException as e:
-            print(f"Error downloading {filename}: {e}")
-        except Exception as e:
-            print(f"An unexpected error occurred for {filename}: {e}")
-
-
 run_cols = ['event_id',
  'match_id',
  'frame_start',
@@ -117,6 +76,16 @@ run_cols = ['event_id',
  'n_opponents_overtaken', # Players passed by run
 ]
 def get_run_events_from_match(match_id):
+    """
+    Fetch and filter off-ball run events for a given match from the SkillCorner open data repository.
+
+    Args:
+        match_id (str): The unique identifier of the match.
+
+    Returns:
+        pd.DataFrame: A DataFrame containing off-ball run events during open play phases 
+                      (excluding set plays and chaotic phases), with columns specified by `run_cols`.
+    """
     event_data_github_url = f"https://raw.githubusercontent.com/SkillCorner/opendata/master/data/matches/{match_id}/{match_id}_dynamic_events.csv"
     events_df =  pd.read_csv(event_data_github_url)
     runs = events_df[events_df["event_type"] == "off_ball_run"]
@@ -124,6 +93,17 @@ def get_run_events_from_match(match_id):
     return open_play_runs
 
 def get_tracking_data_from_match_id(match_id):
+    """
+    Load and preprocess tracking data and metadata for a given match from SkillCorner open data repository.
+
+    Args:
+        match_id (str): The unique identifier of the match.
+
+    Returns:
+        tracking_df (pd.DataFrame): Tracking data transformed to a consistent orientation (attacks left to right for home team).
+        player_id_to_team_id (pd.DataFrame): Mapping DataFrame with columns ['id', 'team_id'] linking player IDs to their teams.
+        home_team (int or str): The identifier of the home team in the match.
+    """
     tracking_data_github_url = f"https://media.githubusercontent.com/media/SkillCorner/opendata/master/data/matches/{match_id}/{match_id}_tracking_extrapolated.jsonl"
     meta_data_github_url = f"https://raw.githubusercontent.com/SkillCorner/opendata/master/data/matches/{match_id}/{match_id}_match.json"
 
@@ -141,18 +121,33 @@ def get_tracking_data_from_match_id(match_id):
         )  # Now, all attacks happen from left to right for home_team
         .to_df(
             engine="pandas"
-        )  # Convert to a Polars DataFrame, or use engine="pandas" for a Pandas DataFrame
+        )  
     )
     
     meta_json = json.loads(requests.get(meta_data_github_url).text)
     player_id_to_team_id = pd.json_normalize(meta_json["players"])[["id","team_id"]]
     home_team = meta_json["home_team"]["id"]
-    # for i,player_id in player_id_to_team_id.iterrows():
-    #     tracking_df[f"{player_id["id"]}_team_id"] = player_id["team_id"]
+
     
     return tracking_df, player_id_to_team_id, home_team
 
 def add_run_curve_ratio(tracking_df,run_features,player_id):
+    """
+    Compute and add the curvature ratio of a player's run path to the run features.
+
+    The curvature ratio measures how much the actual path deviates from a straight line:
+    (path_length / straight_line_distance) - 1.
+    A value of 0 means perfectly straight; higher values indicate more curvy runs.
+
+    Args:
+        tracking_df (pd.DataFrame): Tracking data containing player positions per frame.
+        run_features (pd.DataFrame): DataFrame of run features to which the curve ratio will be added.
+        player_id (str or int): The player ID whose run path is analyzed.
+
+    Returns:
+        pd.DataFrame: The input run_features DataFrame with an added "run_curve_ratio" column.
+    """
+    
     def run_curviness_ratio(x, y):
         try:
             path_length = np.sum(np.sqrt(np.diff(x)**2 + np.diff(y)**2))
@@ -171,6 +166,29 @@ def add_run_curve_ratio(tracking_df,run_features,player_id):
     return run_features
 
 def get_runs_from_match(match_id):
+    """
+    Extract and process off-ball run events and corresponding tracking data for a given match.
+
+    This function performs the following steps:
+    - Retrieves off-ball run events for the specified match.
+    - Loads tracking data for the match, including player and ball positions and velocities.
+    - For each run event:
+      - Extracts tracking frames from 2 seconds before to 2 seconds after the run.
+      - Flips coordinates for away team runs to maintain a consistent left-to-right attacking direction.
+      - Computes player velocities, speeds, and movement directions.
+      - Computes ball velocity and speed.
+      - Flags frames where the run is active.
+      - Calculates run curvature ratio and adds it to run features.
+    - Aggregates run features and reformats tracking data into a long format for analysis.
+
+    Args:
+        match_id (str or int): The unique identifier of the match.
+
+    Returns:
+        run_features_all (pd.DataFrame): DataFrame of processed features for all runs in the match.
+        tracking_long (pd.DataFrame): Long-format DataFrame with tracking data for all runs, including player positions, speeds, and directions.
+        player_to_team (pd.DataFrame): DataFrame mapping player IDs to their team IDs.
+    """
     run_events = get_run_events_from_match(match_id=match_id)
     tracking_df,player_to_team, home_team = get_tracking_data_from_match_id(match_id=match_id)
     run_features_all = []
@@ -233,9 +251,6 @@ def get_runs_from_match(match_id):
         run_features = add_run_curve_ratio(tracking_df=run_tracking,run_features=run_features,player_id=player_id)
         run_features["id"] = event_id
         run_tracking["id"] = event_id
-        # run_object = run(run_features,run_tracking,player_to_team)
-        # run_object.add_run_curve_ratio()
-        #run_objects.append(run_object)
         run_features_all.append(run_features)
         run_tracking_all.append(run_tracking)
         
@@ -267,13 +282,35 @@ def get_runs_from_match(match_id):
     )
 
     tracking_long = tracking_long[meta_cols + ['player', 'x', 'y', 'd', 's']]
-    
-        
-        
-        
+      
     return run_features_all, tracking_long, player_to_team
 
 def get_possessions_from_match_id(match_id):
+    """
+    Retrieve and aggregate possession phases from a match into continuous possession segments.
+
+    This function reads the phases of play data for the given match and merges consecutive
+    possession phases for the same team into aggregated possessions. Each possession includes
+    metadata such as the start and end frames, involved phase indices, possession types, and
+    possession outcomes (leading to shots, goals, or penalty area entries).
+
+    Args:
+        match_id (str or int): Unique identifier of the match.
+
+    Returns:
+        pd.DataFrame: A DataFrame where each row corresponds to an aggregated possession with columns:
+            - match_id: Match identifier.
+            - period: Match period (e.g., half).
+            - phases_indexes: Set of phase indices included in the possession.
+            - frame_start: Starting frame of the possession.
+            - frame_end: Ending frame of the possession.
+            - team_id_possession: Team currently in possession.
+            - phase_types: Set of possession phase types within this possession.
+            - possession_lead_to_shot: Boolean indicating if possession led to a shot.
+            - possession_lead_to_goal: Boolean indicating if possession led to a goal.
+            - possession_leads_to_box: Boolean indicating if possession leads to penalty area entry.
+            - possession_index: Index of the possession (added via reset_index).
+    """
     phases_data_github_url = f"https://raw.githubusercontent.com/SkillCorner/opendata/master/data/matches/{match_id}/{match_id}_phases_of_play.csv"
     phases_df =  pd.read_csv(phases_data_github_url)
 
@@ -312,6 +349,29 @@ def get_possessions_from_match_id(match_id):
     return possessions
             
 def collect_all_data():
+    """
+    Collects and processes comprehensive soccer match data including possessions, runs, tracking, 
+    and player-team mappings from SkillCorner open data.
+
+    This function downloads the list of matches, then for each match:
+    - Retrieves aggregated possessions.
+    - Extracts run features and corresponding tracking data.
+    - Loads player-to-team mappings.
+
+    After collecting data from all matches, it:
+    - Concatenates possessions, run features, tracking, and player-team info into unified DataFrames.
+    - Merges run features with possession indices.
+    - Cleans and fills missing values in tracking data.
+    - Adds velocity and acceleration features to the tracking data.
+    - Merges possessions and runs datasets to combine possession-level and run-level labels for shots and goals.
+
+    Returns:
+        possessions (pd.DataFrame): DataFrame containing aggregated possessions data.
+        run_features (pd.DataFrame): DataFrame containing features for each run event.
+        tracking_data_2 (pd.DataFrame): Processed tracking data with velocities and accelerations added.
+        player_team (pd.DataFrame): Player to team mapping indexed by player ID.
+        merged (pd.DataFrame): Combined dataset of possessions and runs with updated shot and goal flags.
+    """
     matches_info_github_url = f"https://raw.githubusercontent.com/SkillCorner/opendata/master/data/matches.json"
     response = requests.get(matches_info_github_url)
     response.raise_for_status()  # raises error if download failed
@@ -360,6 +420,32 @@ def collect_all_data():
     return possessions, run_features, tracking_data_2, player_team.set_index("id"), merged
 
 def add_velocity_acceleration_to_tracking(tracking_data):
+    """
+    Adds velocity and acceleration features for players and the ball to the tracking DataFrame.
+
+    Calculates frame-to-frame differences in position to estimate velocities (dx, dy) and accelerations (ax, ay)
+    for each player and the ball within each match, run, and player group. Also computes speed magnitude, direction,
+    acceleration magnitude along velocity direction, and acceleration direction.
+
+    Args:
+        tracking_data (pd.DataFrame): DataFrame containing tracking data with columns including 'x', 'y', 'ball_x', 'ball_y',
+                                      and identifiers like 'match_id', 'run_id', 'player', and 'period_id'.
+
+    Returns:
+        pd.DataFrame: Updated tracking DataFrame with additional columns:
+            - dx, dy: player velocity components per frame.
+            - ax, ay: player acceleration components per frame.
+            - speed: player speed magnitude.
+            - speed_direction: player velocity angle in radians.
+            - acceleration: player acceleration projected along velocity direction.
+            - acc_direction: player acceleration angle in radians.
+            - ball_dx, ball_dy: ball velocity components per frame.
+            - ball_ax, ball_ay: ball acceleration components per frame.
+            - ball_speed: ball speed magnitude.
+            - ball_speed_direction: ball velocity angle in radians.
+            - ball_acceleration: ball acceleration projected along velocity direction.
+            - ball_acc_direction: ball acceleration angle in radians.
+    """
     tracking_data = tracking_data.sort_values(
         ["match_id","run_id","player", "timestamp"]
     )
@@ -476,7 +562,32 @@ def add_velocity_acceleration_to_tracking(tracking_data):
     )
     return tracking_data
 
-def collect_data_from_matches(match_ids):    
+def collect_data_from_matches(match_ids):
+    """
+    Collects and processes possessions, run features, tracking data, and player-team mappings from multiple matches.
+
+    For each match ID in the provided list, this function:
+    - Retrieves possession data using `get_possessions_from_match_id`.
+    - Retrieves run features, tracking data, and player-to-team mappings using `get_runs_from_match`.
+    - Concatenates data across all matches.
+    - Merges run features with possession data to associate runs with possessions.
+    - Cleans and filters tracking data by removing invalid coordinates and unnecessary columns.
+    - Fills missing speed and direction values.
+    - Adds velocity and acceleration features to the tracking data.
+    - Converts player IDs to integers.
+    - Merges possessions and run features into a combined DataFrame, updating shot and goal lead flags.
+
+    Args:
+        match_ids (list): List of match IDs to process.
+
+    Returns:
+        tuple:
+            possessions (pd.DataFrame): DataFrame containing possessions data from all matches.
+            run_features (pd.DataFrame): DataFrame containing run features merged with possession indices.
+            tracking_data_2 (pd.DataFrame): Cleaned tracking data with added velocity and acceleration features.
+            player_team (pd.DataFrame): Player-to-team mapping with player IDs as index.
+            merged (pd.DataFrame): Combined DataFrame of possessions and run features with updated shot/goal lead info.
+    """    
     possessions = []
     run_features = []
     tracking_data = []
