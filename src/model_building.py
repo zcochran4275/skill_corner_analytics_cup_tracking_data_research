@@ -5,18 +5,43 @@ from tqdm import tqdm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 from torch.utils.data import Dataset
 
 from torch_geometric.data import Data, Batch
-from torch_geometric.loader import DataLoader as GeoDataLoader
-from torch_geometric.nn import GCNConv
 from torch_geometric.nn import TransformerConv
 
 def build_graph_from_frame(frame_df, runner_player_id, player_to_team):
     """
-    frame_df: rows = players at ONE frame_id
+    Constructs a graph representation of player and ball states for a single frame in a soccer match.
+
+    Args:
+        frame_df (pd.DataFrame): DataFrame containing tracking data for all players and the ball at one specific frame.
+                                 Must include columns: ["player", "x", "y", "dx", "dy", "s", "d", "acceleration", "acc_direction",
+                                 "ball_x", "ball_y", "ball_dx", "ball_dy", "ball_speed", "ball_speed_direction",
+                                 "ball_acceleration", "ball_acc_direction"].
+        runner_player_id (int): The player ID of the runner (target player) in this frame.
+        player_to_team (pd.DataFrame): DataFrame mapping player IDs to their team IDs.
+
+    Returns:
+        torch_geometric.data.Data: A graph data object with the following fields:
+            - x (Tensor): Node features matrix of shape [num_nodes, feature_dim]. Features include player and ball spatial,
+                          velocity, acceleration, runner and ball flags.
+            - edge_index (LongTensor): Edge connectivity matrix of shape [2, num_edges], fully connected excluding self-loops.
+            - edge_attr (Tensor): Edge attributes matrix of shape [num_edges, 4], containing relative distance, same-team flag,
+                                  ball edge flag, and relative speed along edge direction.
+            - runner_idx (LongTensor): Index of the runner player node within the node list.
+            - team_ids (Tensor): Team IDs for each node, with -1 for the ball node.
+            - is_ball (Tensor): Boolean mask indicating which node corresponds to the ball.
+
+    Description:
+        - Creates player nodes with positional, velocity, and acceleration features.
+        - Adds the ball as an additional node with its own features.
+        - Marks the runner player node with a dedicated flag.
+        - Constructs edges connecting all nodes except self-connections.
+        - Computes edge attributes capturing spatial and team relationship dynamics.
+
+    This graph structure serves as input to graph neural networks for spatial-temporal modeling of player and ball interactions.
     """
     frame_df = frame_df.sort_values("player").reset_index(drop=True)
 
@@ -147,6 +172,39 @@ def build_graph_from_frame(frame_df, runner_player_id, player_to_team):
     
 
 class TemporalRunnerDataset(Dataset):
+    """
+    PyTorch Dataset for preparing graph-based sequential data of player runs in soccer matches.
+
+    Args:
+        tracking_df (dict or pd.DataFrameGroupBy): Dictionary or grouped DataFrame where keys are (match_id, run_id) tuples,
+            and values are DataFrames containing tracking data for all players and ball across frames within that run.
+        run_features (pd.DataFrame): DataFrame containing metadata for each run, including:
+            - "match_id": match identifier
+            - "event_id": run event identifier
+            - "player_id": runner player ID
+            - "frame_start_run": start frame index of the run
+            - "frame_end_run": end frame index of the run
+            - "possession_lead_to_shot": binary label indicating if run led to a shot
+            - "possession_lead_to_goal": binary label indicating if run led to a goal
+            - "id": run event ID (used for label lookup)
+        player_to_team (pd.DataFrame): DataFrame mapping player IDs to their team IDs.
+
+    Methods:
+        __len__():
+            Returns the number of runs available.
+
+        __getitem__(idx):
+            For a given index, returns:
+                - graphs: List of graph objects representing each frame in the run, created by `build_graph_from_frame`.
+                - target_path: Tensor of shape [run_length, 2] containing runner's x,y positions relative to run start.
+                - shot_label: Tensor scalar (0.0 or 1.0) indicating if the run led to a shot.
+                - goal_label: Tensor scalar (0.0 or 1.0) indicating if the run led to a goal.
+
+    Description:
+        For each run, this dataset extracts the sequence of frames, converts each frame into a graph of players and ball,
+        normalizes runner positions relative to the run start frame, and retrieves binary outcome labels for shot and goal.
+        The dataset facilitates training spatial-temporal GNN models for trajectory and event prediction tasks.
+    """
     def __init__(self, tracking_df, run_features, player_to_team):
         self.df = tracking_df
         self.run_features = run_features
@@ -195,8 +253,6 @@ class TemporalRunnerDataset(Dataset):
                 runner_row["y"] - y0
             ])
 
-        graphs_batch = Batch.from_data_list(graphs)
-
         target_path = torch.tensor(runner_positions, dtype=torch.float)  # [L,2]
         
         lead_to_shot_val = self.run_features.loc[self.run_features['id'] == run_id, 'possession_lead_to_shot'].values
@@ -210,23 +266,35 @@ class TemporalRunnerDataset(Dataset):
             goal_label = torch.tensor(0.0) 
         else:
             goal_label = torch.tensor(float(lead_to_goal_val[0]))
-        
-        x_threat_run = self.run_features.loc[self.run_features['id'] == run_id, 'xthreat'].values
-        if len(x_threat_run) == 0:
-            x_threat_run = torch.tensor(0.0) 
-        else:
-            x_threat_run = torch.tensor(float(x_threat_run[0]))
-        
-        x_pass_run = self.run_features.loc[self.run_features['id'] == run_id, 'xpass_completion'].values
-        if len(x_pass_run) == 0:
-            x_pass_run = torch.tensor(0.0) 
-        else:
-            x_pass_run = torch.tensor(float(x_pass_run[0]))
 
-        return graphs, target_path, shot_label, goal_label, x_threat_run, x_pass_run
+        return graphs, target_path, shot_label, goal_label
 
 def collate_fn(batch, max_len=100):
-    graphs_list, targets_list, shot_labels_list, goal_labels_list, x_threat_list, x_pass_list = zip(*batch)
+    """
+    Custom collate function to prepare batches of graph sequences with padded target trajectories
+    and associated binary labels for model training.
+
+    Args:
+        batch (list): List of tuples returned by TemporalRunnerDataset.__getitem__, each containing:
+            - graphs (list of Data): List of graph objects for each frame in a run.
+            - target_path (Tensor): Runner's relative x,y positions, shape [run_length, 2].
+            - shot_label (Tensor): Binary label indicating if run led to a shot.
+            - goal_label (Tensor): Binary label indicating if run led to a goal.
+        max_len (int, optional): Maximum length to pad or truncate target trajectories. Defaults to 100.
+
+    Returns:
+        batch_graphs (Batch): Batched graph object combining all graphs in the batch (across all runs and frames).
+        padded_targets (Tensor): Tensor of shape [batch_size, max_len, 2] containing zero-padded or truncated target trajectories.
+        lengths (list[int]): List of actual run lengths (capped at max_len) for each example in the batch.
+        shot_labels (Tensor): Tensor of shape [batch_size] with binary shot labels.
+        goal_labels (Tensor): Tensor of shape [batch_size] with binary goal labels.
+
+    Notes:
+        - The function flattens the list of graph sequences into a single list for batching.
+        - Target trajectories shorter than max_len are zero-padded; longer ones are truncated.
+        - This collate function enables variable-length sequences to be batched efficiently for GNN + temporal models.
+    """
+    graphs_list, targets_list, shot_labels_list, goal_labels_list = zip(*batch)
 
     batch_graphs = Batch.from_data_list([g for graphs in graphs_list for g in graphs])
 
@@ -241,15 +309,41 @@ def collate_fn(batch, max_len=100):
     lengths = [min(l, max_len) for l in lengths]
     shot_labels = torch.tensor(shot_labels_list, dtype=torch.float)
     goal_labels = torch.tensor(goal_labels_list, dtype=torch.float)
-    x_t_labels = torch.tensor(x_threat_list, dtype=torch.float)
-    x_pass_labels = torch.tensor(x_pass_list, dtype=torch.float)
 
-
-    return batch_graphs, padded_targets, lengths, shot_labels, goal_labels, x_t_labels,x_pass_labels
+    return batch_graphs, padded_targets, lengths, shot_labels, goal_labels
 
 
 
 class TemporalRunnerGNN(nn.Module):
+    """
+    TemporalRunnerGNN predicts the trajectory of a soccer player (runner) over time using spatial-temporal graph neural networks.
+
+    Architecture:
+    - Two-layer Transformer-based Graph Neural Network (TransformerConv) to encode spatial relationships between players and the ball per frame.
+    - Learned temporal positional encoding added to the runner node embeddings sequence.
+    - Transformer Encoder layers to model temporal dependencies across frames.
+    - Final linear layer to predict 2D runner positions (x, y) for each frame.
+
+    Args:
+        node_feat_dim (int): Number of input features per node.
+        edge_dim (int): Number of features per edge.
+        gnn_hidden_dim (int): Hidden dimension size for GNN layers and temporal encoder.
+
+    Forward Input:
+        graphs_batch (torch_geometric.data.Batch): Batched graph data containing all frames in the batch.
+        lengths (list[int]): List containing the length (number of frames) of each run in the batch.
+
+    Forward Output:
+        pred_path (Tensor): Predicted runner trajectories of shape (batch_size, max_length, 2), 
+            where max_length is the longest run length in the batch.
+
+    Notes:
+    - The model extracts embeddings specifically for the runner node from each frame graph.
+    - Runner embeddings are padded to the maximum sequence length in the batch for efficient temporal encoding.
+    - Causal masking prevents the Transformer from attending to future frames.
+    - Padding mask ensures frames beyond run length are ignored in the Transformer.
+    """
+    
     def __init__(self, node_feat_dim, edge_dim, gnn_hidden_dim):
         super().__init__()
 
@@ -354,6 +448,36 @@ class TemporalRunnerGNN(nn.Module):
     
     
 def train_model(model, device, dataloader,num_epochs = 10,output_file = "temporal_runner_gnn_v2.pth"):
+    """
+    Train the TemporalRunnerGNN model on run trajectory data with weighted loss components.
+
+    Args:
+        model (nn.Module): The TemporalRunnerGNN model instance to train.
+        device (torch.device): Device (CPU/GPU) for computation.
+        dataloader (DataLoader): PyTorch DataLoader providing batches of graph data, targets, and labels.
+        num_epochs (int, optional): Number of training epochs. Default is 10.
+        output_file (str, optional): File path to save the trained model weights. Default is 'temporal_runner_gnn_v2.pth'.
+
+    Training Details:
+        - Uses Adam optimizer with learning rate 1e-3.
+        - Loss is a weighted sum of:
+            - Position MSE loss
+            - Velocity MSE loss (first-order difference)
+            - Acceleration MSE loss (second-order difference)
+            - Speed penalty for exceeding maximum speed (v_max=9.5)
+        - Sample weights increase loss contribution for runs leading to shots and goals.
+        - Uses exponential moving average (EMA) for stable loss tracking.
+        - Loss components lambda weights:
+            - Velocity loss: 1.0
+            - Acceleration loss: 0.1
+            - Speed penalty: 0.5
+            - Shot weight: 2.0
+            - Goal weight: 3.0
+            - Base weight: 1.0
+
+    Returns:
+        model (nn.Module): Trained model instance with updated weights.
+    """
 
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
@@ -366,20 +490,13 @@ def train_model(model, device, dataloader,num_epochs = 10,output_file = "tempora
     shot_weight = 2.0
     goal_weight = 3.0
     base_weight = 1.0
-
-    ema_decay = 0.995
-
-    def update_ema(old, new):
-        if old is None:
-            return new
-        return ema_decay * old + (1 - ema_decay) * new
         
     model.train()
     
     for epoch in range(num_epochs):
         
         total_loss = 0
-        for batch_graphs, padded_targets, lengths, shot_labels, goal_labels, x_threat_labels, x_pass_labels in tqdm(dataloader):
+        for batch_graphs, padded_targets, lengths, shot_labels, goal_labels in tqdm(dataloader):
             batch_graphs = batch_graphs.to(device)
             padded_targets = padded_targets.to(device)
             shot_labels = shot_labels.to(device)
@@ -441,6 +558,27 @@ def train_model(model, device, dataloader,num_epochs = 10,output_file = "tempora
     return model
 
 def predict_optimal_run(run,model,tracking_frame_groups,device,player_to_team):
+    """
+    Predict the optimal run trajectory for a given run using the trained TemporalRunnerGNN model.
+
+    Args:
+        run (pd.Series): A single run event containing metadata such as match_id, event_id, player_id,
+                         team_id, frame start/end, and start position (x_start, y_start).
+        model (nn.Module): Trained TemporalRunnerGNN model used to predict trajectories.
+        tracking_frame_groups (pd.DataFrameGroupBy): Grouped tracking data indexed by (match_id, event_id).
+        device (torch.device): Device (CPU/GPU) on which to run the model.
+        player_to_team (pd.DataFrame): Mapping from player IDs to team IDs.
+
+    Returns:
+        torch.Tensor: Predicted absolute runner positions over time (tensor shape: [run_length, 2]),
+                      shifted by the run's starting position to absolute field coordinates.
+
+    Process:
+        - Extracts tracking frames for the run from start to end frame.
+        - Converts each frame to a graph with player and ball features.
+        - Batches the graphs and feeds through the model for trajectory prediction.
+        - Converts predicted relative positions back to absolute coordinates by adding start position.
+    """
     match_id = run['match_id']
     run_id = run['event_id']
     runner_id = run['player_id']
@@ -499,6 +637,34 @@ def compute_losses(true_path, pred_path):
     return loss_pos.item(), loss_vel.item(), loss_acc.item()
 
 def evaluate_all_runs(runs_to_predict, model, tracking_frame_groups, device, player_to_team):
+    """
+    Evaluate the TemporalRunnerGNN model's predictions across multiple runs.
+
+    Args:
+        runs_to_predict (pd.DataFrame): DataFrame containing runs metadata to be evaluated.
+        model (nn.Module): Trained TemporalRunnerGNN model used for predictions.
+        tracking_frame_groups (pd.DataFrameGroupBy): Grouped tracking data indexed by (match_id, event_id).
+        device (torch.device): Device (CPU/GPU) to perform computations on.
+        player_to_team (pd.DataFrame): Mapping from player IDs to their team IDs.
+
+    Returns:
+        list of dict: A list containing dictionaries for each run with the following keys:
+            - 'match_id': Match identifier.
+            - 'run_id': Run event identifier.
+            - 'loss_pos': Position mean squared error loss.
+            - 'loss_vel': Velocity mean squared error loss.
+            - 'loss_acc': Acceleration mean squared error loss.
+            - 'possession_lead_to_shot': Indicator if run led to a shot (0 or 1).
+            - 'possession_lead_to_goal': Indicator if run led to a goal (0 or 1).
+
+    Process:
+        - Sets the model to evaluation mode.
+        - Iterates over each run in the dataset.
+        - Predicts the run trajectory using the model.
+        - Retrieves the true trajectory from tracking data.
+        - Computes losses between predicted and true trajectories.
+        - Collects and returns results for all runs.
+    """
     model.eval()
     results = []
 

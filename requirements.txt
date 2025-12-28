@@ -1,0 +1,9 @@
+torch
+torch-geometric
+pandas
+numpy
+matplotlib
+seaborn
+tqdm
+requests
+kloppy
