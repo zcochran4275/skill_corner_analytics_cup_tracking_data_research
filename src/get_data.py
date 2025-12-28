@@ -232,13 +232,10 @@ def get_runs_from_match(match_id):
 
             if x_col in run_tracking.columns and y_col in run_tracking.columns:
                 # Velocity components
-                x = run_tracking[x_col] / 52.5
-                y = run_tracking[y_col] / 34
+                x = run_tracking[x_col] 
+                y = run_tracking[y_col] 
                 vx = x.diff() / .1
                 vy = y.diff() / .1
-                
-                run_tracking[x_col] = x
-                run_tracking[y_col] = y
 
                 # Speed (magnitude of velocity vector)
                 run_tracking[s_col] = np.sqrt(vx**2 + vy**2)
@@ -246,13 +243,11 @@ def get_runs_from_match(match_id):
                 # Direction (angle in radians, atan2 handles quadrants)
                 run_tracking[d_col] = np.arctan2(vy, vx)
                 
-        x = run_tracking["ball_x"] / 52.5
-        y = run_tracking["ball_y"] / 34
+        x = run_tracking["ball_x"]
+        y = run_tracking["ball_y"] 
         vx = x.diff() / .1
         vy = y.diff() / .1
-        
-        run_tracking["ball_x"] = x
-        run_tracking["ball_y"] = y
+
  
         # Compute 3D speed (magnitude of velocity vector)
         run_tracking["ball_speed"] = np.sqrt(vx**2 + vy**2)

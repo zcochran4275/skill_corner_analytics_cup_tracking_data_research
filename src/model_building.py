@@ -12,6 +12,7 @@ from torch.utils.data import Dataset
 from torch_geometric.data import Data, Batch
 from torch_geometric.loader import DataLoader as GeoDataLoader
 from torch_geometric.nn import GCNConv
+from torch_geometric.nn import TransformerConv
 
 def build_graph_from_frame(frame_df, runner_player_id, player_to_team):
     """
@@ -231,13 +232,12 @@ def collate_fn(batch, max_len=100):
 
     lengths = [len(target) for target in targets_list]
 
-    padded_targets = torch.zeros(len(targets_list), max_len, 2)  # fixed max_len padding
+    padded_targets = torch.zeros(len(targets_list), max_len, 2) 
 
     for i, target in enumerate(targets_list):
         length = min(len(target), max_len)
         padded_targets[i, :length] = target[:length]
 
-    # Adjust lengths to max_len if longer sequences exist
     lengths = [min(l, max_len) for l in lengths]
     shot_labels = torch.tensor(shot_labels_list, dtype=torch.float)
     goal_labels = torch.tensor(goal_labels_list, dtype=torch.float)
@@ -248,29 +248,57 @@ def collate_fn(batch, max_len=100):
     return batch_graphs, padded_targets, lengths, shot_labels, goal_labels, x_t_labels,x_pass_labels
 
 
+
 class TemporalRunnerGNN(nn.Module):
-    def __init__(self, node_feat_dim, gnn_hidden_dim, rnn_hidden_dim):
+    def __init__(self, node_feat_dim, edge_dim, gnn_hidden_dim):
         super().__init__()
 
-        self.gnn1 = GCNConv(node_feat_dim, gnn_hidden_dim)
-        self.gnn2 = GCNConv(gnn_hidden_dim, gnn_hidden_dim)
+        self.gnn1 = TransformerConv(
+            in_channels=node_feat_dim,
+            out_channels=gnn_hidden_dim,
+            heads=4,
+            concat=False,
+            edge_dim=edge_dim,
+            dropout = .1
+        )
 
-        self.rnn = nn.GRU(
-            input_size=gnn_hidden_dim,
-            hidden_size=rnn_hidden_dim,
+        self.gnn2 = TransformerConv(
+            in_channels=gnn_hidden_dim,
+            out_channels=gnn_hidden_dim,
+            heads=4,
+            concat=False,
+            edge_dim=edge_dim,
+            dropout=.1
+        )
+
+        self.temporal_pe = nn.Parameter(
+            torch.randn(1, 100, gnn_hidden_dim) * 0.01  # max 100 frames
+        )
+
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=gnn_hidden_dim,
+            nhead=4,
+            dim_feedforward=4 * gnn_hidden_dim,
+            dropout=0.1,
             batch_first=True
         )
 
-        self.pos_head = nn.Linear(rnn_hidden_dim, 2)
+        self.temporal_encoder = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=2
+        )
+        
+        self.pos_head = nn.Linear(gnn_hidden_dim, 2)
 
     def forward(self, graphs_batch, lengths):
         device = next(self.parameters()).device
         graphs_batch = graphs_batch.to(device)
 
-        x, edge_index = graphs_batch.x, graphs_batch.edge_index
+        x, edge_index, edge_attr = graphs_batch.x, graphs_batch.edge_index,graphs_batch.edge_attr
+        edge_attr = edge_attr / edge_attr.std(dim=0, keepdim=True).clamp(min=1e-6)
 
-        x = F.relu(self.gnn1(x, edge_index))
-        x = F.relu(self.gnn2(x, edge_index))
+        x = F.relu(self.gnn1(x, edge_index, edge_attr))
+        x = F.relu(self.gnn2(x, edge_index, edge_attr))
 
         batch_vec = graphs_batch.batch 
         runner_idx = graphs_batch.runner_idx  
@@ -302,35 +330,54 @@ class TemporalRunnerGNN(nn.Module):
             runner_embeds_per_run.append(run_embeds)
 
         runner_embeds_batch = torch.stack(runner_embeds_per_run)
+        
+        T = runner_embeds_batch.size(1)
 
-        packed = pack_padded_sequence(runner_embeds_batch, lengths, batch_first=True, enforce_sorted=False)
-        packed_out, _ = self.rnn(packed)
-        out, _ = pad_packed_sequence(packed_out, batch_first=True)
+        x = runner_embeds_batch + self.temporal_pe[:, :T]
+
+        causal_mask = torch.triu(
+            torch.ones(T, T, device=x.device),
+            diagonal=1
+        ).bool()
+
+        # padding mask
+        padding_mask = torch.arange(T, device=x.device)[None, :] >= torch.tensor(lengths, device=x.device)[:, None]
+
+        out = self.temporal_encoder(
+            x,
+            mask=causal_mask,
+            src_key_padding_mask=padding_mask
+        )
 
         pred_path = self.pos_head(out)
-
         return pred_path
     
     
-def train_model(model, device, dataloader,num_epochs = 10):
+def train_model(model, device, dataloader,num_epochs = 10,output_file = "temporal_runner_gnn_v2.pth"):
 
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
     lambda_vel = 1.0
     lambda_acc = .1
     lambda_speed = .5
-    lambda_xT = 2
-    lambda_xPass = 1
+    
     v_max = 9.5
-    a_max = 6.0
 
     shot_weight = 2.0
     goal_weight = 3.0
     base_weight = 1.0
-    
+
+    ema_decay = 0.995
+
+    def update_ema(old, new):
+        if old is None:
+            return new
+        return ema_decay * old + (1 - ema_decay) * new
+        
     model.train()
     
     for epoch in range(num_epochs):
+        
         total_loss = 0
         for batch_graphs, padded_targets, lengths, shot_labels, goal_labels, x_threat_labels, x_pass_labels in tqdm(dataloader):
             batch_graphs = batch_graphs.to(device)
@@ -365,11 +412,10 @@ def train_model(model, device, dataloader,num_epochs = 10):
                     loss_vel = 0
 
                 if length > 2:
-                    pred_acc = (pred_vel[1:] - pred_vel[:-1]) / .1
-                    acc_mag = torch.norm(pred_acc, dim=-1)
-
-                    excess_acc = torch.relu(acc_mag - a_max)
-                    loss_acc = torch.mean(excess_acc ** 2)
+                    pred_acc = (pred_vel[1:] - pred_vel[:-1])
+                    target_acc = target_vel[1:] - target_vel[:-1]
+                    loss_acc = F.mse_loss(pred_acc, target_acc)
+                    
                 else:
                     loss_acc = 0
 
@@ -377,7 +423,7 @@ def train_model(model, device, dataloader,num_epochs = 10):
                 sample_loss = loss_pos + lambda_vel * loss_vel + lambda_acc * loss_acc + lambda_speed * loss_speed
 
                 # Calculate sample weight
-                sample_weight = base_weight + lambda_xPass * x_pass_labels[i] * (lambda_xT * x_threat_labels[i] + shot_weight * shot_labels[i] + goal_weight * goal_labels[i])
+                sample_weight = base_weight + shot_weight * shot_labels[i] + goal_weight * goal_labels[i]
 
                 loss += sample_loss * sample_weight
 
@@ -390,7 +436,7 @@ def train_model(model, device, dataloader,num_epochs = 10):
 
         print(f"Epoch {epoch+1}, Loss: {total_loss / len(dataloader)}")
 
-    torch.save(model.state_dict(), "models/temporal_runner_gnn_v2.pth")
+    torch.save(model.state_dict(), output_file)
     
     return model
 
@@ -430,3 +476,71 @@ def predict_optimal_run(run,model,tracking_frame_groups,device,player_to_team):
     x0, y0 = run[["x_start","y_start"]] 
     absolute_path = pred_path + torch.tensor([x0, y0], device=pred_path.device)
     return absolute_path
+
+def compute_losses(true_path, pred_path):
+    """
+    true_path, pred_path: tensors of shape (T, 2) [x, y]
+    Calculate position, velocity, and acceleration losses.
+    """
+
+    # Position loss (MSE)
+    loss_pos = F.mse_loss(pred_path, true_path)
+
+    # Velocity (first difference)
+    true_vel = true_path[1:] - true_path[:-1]
+    pred_vel = pred_path[1:] - pred_path[:-1]
+    loss_vel = F.mse_loss(pred_vel, true_vel)
+
+    # Acceleration (second difference)
+    true_acc = true_vel[1:] - true_vel[:-1]
+    pred_acc = pred_vel[1:] - pred_vel[:-1]
+    loss_acc = F.mse_loss(pred_acc, true_acc)
+
+    return loss_pos.item(), loss_vel.item(), loss_acc.item()
+
+def evaluate_all_runs(runs_to_predict, model, tracking_frame_groups, device, player_to_team):
+    model.eval()
+    results = []
+
+    for idx, run in runs_to_predict.iterrows():
+        # Predict run path
+        try:
+            absolute_path = predict_optimal_run(run, model, tracking_frame_groups, device, player_to_team)
+        except:
+            pass
+        
+        # Extract true trajectory from tracking data
+        match_id = run['match_id']
+        run_id = run['event_id']
+        runner_id = run['player_id']
+        frame_start = int(run['frame_start_run'])
+        frame_end = int(run['frame_end_run'])
+
+        run_tracking = tracking_frame_groups[(match_id, run_id)].sort_values('frame_id')
+        true_points_df = run_tracking[(run_tracking['player'] == runner_id) & 
+                                     (run_tracking['frame_id'] >= frame_start) & 
+                                     (run_tracking['frame_id'] <= frame_end)]
+
+        true_path = torch.tensor(true_points_df[['x', 'y']].values, device=device, dtype=torch.float32)
+        
+        min_len = min(len(true_path), len(absolute_path))
+        true_path = true_path[:min_len]
+        pred_path = absolute_path[:min_len]
+
+        # Compute losses
+        loss_pos, loss_vel, loss_acc = compute_losses(true_path, pred_path)
+
+        shot_flag = int(run.get("possession_lead_to_shot", 0))
+        goal_flag = int(run.get("possession_lead_to_goal", 0))
+
+        results.append({
+            'match_id': match_id,
+            'run_id': run_id,
+            'loss_pos': loss_pos,
+            'loss_vel': loss_vel,
+            'loss_acc': loss_acc,
+            'possession_lead_to_shot': shot_flag,
+            'possession_lead_to_goal': goal_flag
+        })
+
+    return results

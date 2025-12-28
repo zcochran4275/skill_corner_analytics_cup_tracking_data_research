@@ -312,19 +312,17 @@ def animate_run(run,tracking_data,player_to_team,title=""):
     run_tracking = tracking_long_to_wide(tracking_data_filtered)
 
     player_ids = [col.split("_")[0] for col in run_tracking.columns if col.endswith("_x")]
-    player_ids = sorted(set(player_ids) - {'ball'})  # exclude 'ball' if needed
+    player_ids = sorted(set(player_ids) - {'ball'})  
     valid_player_ids = []
 
     for pid in player_ids:
         x_col = f"{pid}_x"
         y_col = f"{pid}_y"
         
-        # Check if player columns exist (just in case)
         if x_col in run_tracking.columns and y_col in run_tracking.columns:
             all_zero_x = (run_tracking[x_col] == 0).all()
             all_zero_y = (run_tracking[y_col] == 0).all()
             
-            # Keep player only if NOT all zeros for both x and y
             if not (all_zero_x and all_zero_y):
                 valid_player_ids.append(pid)
     fig, ax = plot_soccer_pitch(pitch_color="white")
@@ -332,15 +330,6 @@ def animate_run(run,tracking_data,player_to_team,title=""):
     all_colors = list(player_to_color.values()) + ['black']
     dummy_coords = np.zeros((len(player_to_color)+1, 2))
     scat = ax.scatter(dummy_coords[:, 0], dummy_coords[:, 1], c=all_colors, s=50)
-    #dummy arrows 
-    arrow_starts = np.zeros((len(valid_player_ids), 2))
-    arrow_dirs = np.zeros((len(valid_player_ids), 2))
-    quiv = ax.quiver(
-        arrow_starts[:, 0], arrow_starts[:, 1],
-        arrow_dirs[:, 0], arrow_dirs[:, 1],
-        color=all_colors[:-1], scale=1, scale_units='xy', angles='xy',
-        width=0.005/2, headwidth=3/2, headlength=5/2
-    )
     #legend
     legend_handles = []
     legend_handles.append(
@@ -364,16 +353,7 @@ def animate_run(run,tracking_data,player_to_team,title=""):
         coords = [[current[f"{pid}_x"], current[f"{pid}_y"]] for pid in valid_player_ids]
         coords.append([current["ball_x"], current["ball_y"]])
         scat.set_offsets(coords)
-        starts = np.array(coords[:-1])
-        directions = np.array([
-            [
-                current[f"{pid}_s"] * np.cos(current[f"{pid}_d"]) if pd.notna(current[f"{pid}_s"]) and pd.notna(current[f"{pid}_d"]) else 0,
-                current[f"{pid}_s"] * np.sin(current[f"{pid}_d"]) if pd.notna(current[f"{pid}_s"]) and pd.notna(current[f"{pid}_d"]) else 0
-            ] for pid in valid_player_ids
-        ])
-        quiv.set_offsets(starts)
-        quiv.set_UVC(directions[:, 0], directions[:, 1])
-        return scat, quiv
+        return scat, 
 
     def update(frame):
         current = run_tracking.iloc[frame]
@@ -382,20 +362,10 @@ def animate_run(run,tracking_data,player_to_team,title=""):
         scat.set_offsets(coords)
         sizes = [50] * len(valid_player_ids) + [50]
         scat.set_sizes(sizes)
-        # Update quiver arrows
-        starts = np.array([[current[f"{pid}_x"], current[f"{pid}_y"]] for pid in valid_player_ids])
-        directions = np.array([
-            [
-                current[f"{pid}_s"] * np.cos(current[f"{pid}_d"]) if pd.notna(current[f"{pid}_s"]) and pd.notna(current[f"{pid}_d"]) else 0,
-                current[f"{pid}_s"] * np.sin(current[f"{pid}_d"]) if pd.notna(current[f"{pid}_s"]) and pd.notna(current[f"{pid}_d"]) else 0
-            ] for pid in valid_player_ids
-        ])
 
-        quiv.set_offsets(starts)
-        quiv.set_UVC(directions[:, 0], directions[:, 1])
 
-        return scat, quiv
-    ani = animation.FuncAnimation(fig, update, frames=len(run_tracking), init_func=init, blit=False, interval=100, repeat=True)
+        return scat,
+    ani = animation.FuncAnimation(fig, update, frames=len(run_tracking), init_func=init, blit=True, interval=100, repeat=True)
     plt.show()
     return ani
 
