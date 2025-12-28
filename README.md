@@ -49,11 +49,13 @@ This study presents a comprehensive framework combining spatial-temporal graph n
 #### Loss Functions
 
 1. **Position Loss (Trajectory MSE)**  
+
 $$
 \mathcal{L}_{\text{pos}}^{(i)} = \frac{1}{T_i} \sum_{t=1}^{T_i} \left\| \hat{\mathbf{p}}_t^{(i)} - \mathbf{p}_t^{(i)} \right\|^2
 $$
 
 2. **Velocity Loss**  
+
 $$
 \mathcal{L}_{\text{vel}}^{(i)} = \frac{1}{T_i - 1} \sum_{t=1}^{T_i - 1} \left\| \hat{\mathbf{v}}_t^{(i)} - \mathbf{v}_t^{(i)} \right\|^2
 $$
@@ -66,6 +68,7 @@ $$
 $$
 
 3. **Acceleration Loss**  
+
 $$
 \mathcal{L}_{\text{acc}}^{(i)} = \frac{1}{T_i - 2} \sum_{t=1}^{T_i - 2} \left\| \hat{\mathbf{a}}_t^{(i)} - \mathbf{a}_t^{(i)} \right\|^2
 $$
@@ -80,6 +83,7 @@ $$
 
 
 4. **Sample Weight**  
+
 $$
 w_i = w_{\text{base}} + w_{\text{shot}} \cdot y_i^{\text{shot}} + w_{\text{goal}} \cdot y_i^{\text{goal}}
 $$
