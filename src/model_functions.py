@@ -619,8 +619,8 @@ def train_model(model, device, dataloader, num_epochs=10, output_file="temporal_
     dt = 0.1
     T_intent = 10
 
-    shot_weight = 5.0
-    goal_weight = 10.0
+    shot_weight = 2.0
+    goal_weight = 4.0
     base_weight = 1.0
 
     ce_loss = nn.CrossEntropyLoss()
@@ -806,7 +806,7 @@ def predict_optimal_run(run,model,tracking_frame_groups,device,player_to_team,ru
         run_type: {
             "run_type_prob": run_type_probs[idx],
             "shot_prob": shot_probs_per_type[idx],
-            "run_path": run_paths_per_type[idx] + [x0,y0],
+            "run_path": run_paths_per_type[idx] + np.array([x0,y0]),
         }
         for run_type, idx in run_type_vocab.items()
     }

@@ -232,23 +232,33 @@ def get_runs_from_match(match_id):
 
             if x_col in run_tracking.columns and y_col in run_tracking.columns:
                 # Velocity components
-                vx = run_tracking[x_col].diff() / .1
-                vy = run_tracking[y_col].diff() / .1
+                x = run_tracking[x_col] / 52.5
+                y = run_tracking[y_col] / 34
+                vx = x.diff() / .1
+                vy = y.diff() / .1
+                
+                run_tracking[x_col] = x
+                run_tracking[y_col] = y
 
                 # Speed (magnitude of velocity vector)
                 run_tracking[s_col] = np.sqrt(vx**2 + vy**2)
 
                 # Direction (angle in radians, atan2 handles quadrants)
                 run_tracking[d_col] = np.arctan2(vy, vx)
-        vx = run_tracking["ball_x"].diff() / .1
-        vy = run_tracking["ball_y"].diff() / .1
-        vz = run_tracking["ball_z"].diff() / .1
-
+                
+        x = run_tracking["ball_x"] / 52.5
+        y = run_tracking["ball_y"] / 34
+        vx = x.diff() / .1
+        vy = y.diff() / .1
+        
+        run_tracking["ball_x"] = x
+        run_tracking["ball_y"] = y
+ 
         # Compute 3D speed (magnitude of velocity vector)
-        run_tracking["ball_speed"] = np.sqrt(vx**2 + vy**2 + vz**2)
+        run_tracking["ball_speed"] = np.sqrt(vx**2 + vy**2)
         
         run_features = run_row[run_cols]
-        run_features = add_run_curve_ratio(tracking_df=run_tracking,run_features=run_features,player_id=player_id)
+        # run_features = add_run_curve_ratio(tracking_df=run_tracking,run_features=run_features,player_id=player_id)
         run_features["id"] = event_id
         run_tracking["id"] = event_id
         run_features_all.append(run_features)
@@ -476,13 +486,13 @@ def add_velocity_acceleration_to_tracking(tracking_data):
     #Speed
     FPS = 10
 
-    tracking_data["speed"] = (
+    tracking_data["s"] = (
         np.sqrt(
             tracking_data["dx"]**2 +
             tracking_data["dy"]**2
         ) * FPS
     )
-    tracking_data["speed_direction"] = np.arctan2(
+    tracking_data["d"] = np.arctan2(
         tracking_data["dy"],
         tracking_data["dx"]
     )
