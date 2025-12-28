@@ -16,7 +16,7 @@ Each frame was represented as a graph with nodes for players and the ball, featu
 The TemporalRunnerGNN model predicts runner trajectories using two stacked TransformerConv layers for spatial encoding of each graph frame. The runner’s node embeddings were extracted per frame and assembled into temporal sequences padded to uniform length.
 A Transformer encoder with learned temporal positional embeddings processed these sequences using causal masking to prevent future information leakage. The final output was a linear projection predicting 2D runner positions at each timestep.
 
-![](run_trajectory_architecture_h.png)
+![](model_picture.png)
 
 Training minimized mean squared error between predicted and true runner positions, computed only over valid timesteps using padding masks. This encourages learning of realistic, context-aware off-ball movement.
 
