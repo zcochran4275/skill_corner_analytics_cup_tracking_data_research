@@ -501,8 +501,6 @@ def train_model(model, device, dataloader,num_epochs = 10,output_file = "tempora
             padded_targets = padded_targets.to(device)
             shot_labels = shot_labels.to(device)
             goal_labels = goal_labels.to(device)
-            x_threat_labels = x_threat_labels.to(device)
-            x_pass_labels = x_pass_labels.to(device)
             
             optimizer.zero_grad()
 
